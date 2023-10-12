@@ -6,9 +6,13 @@ Elasticsearch工具类、PHP版基础ES搜索工具类
 
 使用Demo：
 include_once("elasticTools.php");
+
 $size = 20;
+
 $pageSize = 1;
+
 $results = $esTools->setIndex('order');
+
   // must搜索
     // ->where('status', 2)
     // ->whereIn('shipping_status', array(1, 2))
@@ -19,7 +23,11 @@ $results = $esTools->setIndex('order');
   // should搜索
     // ->orWhere('status', 2)
     // ->orderBy('create_time', 'desc')
+    
   ->limit($size)
+  
   ->offset(($pageSize - 1) * $size)
+  
 //    ->printQuery() // 打印query
+
     ->search();
