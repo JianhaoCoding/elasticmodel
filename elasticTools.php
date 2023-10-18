@@ -2,32 +2,35 @@
 require 'vendor/autoload.php';
 
 use Elasticsearch\ClientBuilder;
+use Exception;
+use stdClass;
 
 /**
- * Elasticsearch工具类
- * @desc PHP版基础ES搜索工具类
+ * Elasticsearch搜索类
+ * @desc PHP版基础ES搜索类
  *  其中包含了很多 冗余重复 代码可以抽象优化，为了 简单易懂 没有优化处理 <不喜勿喷>！！！
  *  completion suggester 自动补全建议搜索，前缀搜索，使用Suggest一类方法的时候必须确保您的索引映射中有一个字段是 completion 类型，completion类型创建如下：
  *  {
-        "mappings": {
-            "properties": {
-                "suggest": {
-                    "type": "completion"
-                }
-            }
-        }
-    }
+"mappings": {
+"properties": {
+"suggest": {
+"type": "completion"
+}
+}
+}
+}
  * @author jianhaofly@163.com
  * @time 2023/09/21 09:22
  */
-class elasticTools {
+class SearchModel extends Model {
 
-    private static $instance = null;// 单例对象
     private $client;                // 连接
     private $index;                 // 索引名称
     private $fields = [];           // 搜索字段
     private $conditions = [];       // 搜索条件
     private $sortFields = [];       // 排序字段
+    private $suggest = [];          // 自动补全查询结构体
+    private $collapse = '';         // 折叠过滤字段
     private $isDistance = FALSE;    // 是否地理位置搜索
     private $isPrintQuery= FALSE;   // 是否打印Query 排查问题
     private $minimumShouldMatch = 1;// 满足查询条件所需的 should 子句的最小数量
@@ -35,33 +38,20 @@ class elasticTools {
     private $size = 10;
 
     // 构造私有化，防止直接创建对象
-    private function __construct() {
-        // TODO: ES主机和端口
-        $params = array(
-            'hosts' => ['localhost:9200'],
-        );
-        $this->client = ClientBuilder::create()->setHosts($params['hosts'])->build();
+    public function __construct() {
+        parent::__construct();
+
+        $esConfig = config('Elasticsearch');
+        $this->client = ClientBuilder::create()
+            ->setHosts($esConfig->hosts)
+            ->build();
     }
-
-    // 公有静态方法，返回该类的唯一实例
-    public static function getInstance() {
-        if (is_null(self::$instance)) {
-            self::$instance = new self();
-        }
-        return self::$instance;
-    }
-
-    // 阻止对象被克隆
-    private function __clone() {}
-
-    // 阻止对象被反序列化
-    private function __wakeup() {}
 
     /**
      * 设置索引
      * @param string $index
      * @return $this
-     * @author gengjianhao
+     * @author jianhaofly@163.com
      * @time 2023/09/30 11:10
      */
     public function setIndex($index) {
@@ -73,7 +63,7 @@ class elasticTools {
      * 设置满足查询条件所需的 should 子句的最小数量
      * @param int $num
      * @return $this
-     * @author gengjianhao
+     * @author jianhaofly@163.com
      * @time 2023/09/20/15:05
      */
     public function setMinimumShouldMatch($num) {
@@ -82,14 +72,26 @@ class elasticTools {
     }
 
     /**
+     * 设置折叠过滤字段
+     * @param string $field
+     * @return $this
+     * @author jianhaofly@163.com
+     * @time 2023/10/17/10:08
+     */
+    public function setCollapseField($field) {
+        $this->collapse = $field;
+        return $this;
+    }
+
+    /**
      * 搜索单条数据
      * @params int $docId
      * @params string $primaryKey 必须是唯一标识
      * @return array|callable
-     * @author gengjianhao
+     * @author jianhaofly@163.com
      * @time 2023/09/20 11:38
      */
-    public function find($docId, $primaryKey = 'id') {
+    public function findDoc($docId, $primaryKey = 'id') {
         // 文档ID不能为空
         if (empty($docId)) return array('code' => -1, 'message' => 'No docId specified', 'data' => array());
 
@@ -132,7 +134,7 @@ class elasticTools {
      *         'user'、'goods'、'order'自定义表字段
      *         'user_id,user_name.....'自定义搜索字段
      * @return array
-     * @author gengjianhao
+     * @author jianhaofly@163.com
      * @time 2023/09/30 11:10
      */
     public function fieldList($fields = '') {
@@ -143,7 +145,7 @@ class elasticTools {
             case 'user':
             case 'goods':
             case 'order':
-            // 等等需要查询哪些字段单独处理
+                // 等等需要查询哪些字段单独处理
 
                 break;
             default:
@@ -156,10 +158,10 @@ class elasticTools {
      * 搜索多条数据
      * @params bool $isPrintQuery
      * @return array|callable
-     * @author gengjianhao
+     * @author jianhaofly@163.com
      * @time 2023/09/30 11:10
      */
-    public function search($isPrintQuery = false) {
+    public function search() {
         // 组装查询参数
         $searchParams = [
             'index' => $this->index,
@@ -170,7 +172,7 @@ class elasticTools {
                 'future' => 'lazy',
                 'ignore' => [400, 404]
             ),
-            '_source' => $this->fields,
+            '_source' => empty($this->fields) ? '*' : $this->fields,
             'body'  => [
                 // track_total_hits 用于控制是否完全计算总命中数,配置控制搜索结果中总命中数的跟踪的参数,大型数据集中提高搜索性能
                 // 可传递参数：
@@ -193,6 +195,10 @@ class elasticTools {
 
             $searchParams['body']['query'] = $query;
         }
+        // 自动补全查询
+        if (!empty($this->suggest)) {
+            $searchParams['body']['suggest'] = $this->suggest;
+        }
         // 排序
         if (!empty($this->sortFields)) {
             $searchParams['body']['sort'] = $this->sortFields;
@@ -201,11 +207,16 @@ class elasticTools {
         $searchParams['body']['from'] = $this->from;
         $searchParams['body']['size'] = $this->size;
 
+        // 是否存在折叠过滤
+        if (!empty($this->collapse)) {
+            $searchParams['body']['collapse']['field'] = $this->collapse;
+        }
+
         // 打印格式化query
         if ($this->isPrintQuery) {
-             echo "<pre>";
-             var_dump(json_encode($searchParams));
-             die;
+            echo "<pre>";
+            var_dump(json_encode($searchParams));
+            die;
         }
 
         // 查询结果集
@@ -240,7 +251,7 @@ class elasticTools {
     /**
      * 设置打印Query语句
      * @return $this
-     * @author gengjianhao
+     * @author jianhaofly@163.com
      * @time 2023/09/22 17:10
      */
     public function printQuery() {
@@ -252,7 +263,7 @@ class elasticTools {
      * 生成bool查询
      * @param array $params
      * @return array
-     * @author gengjianhao
+     * @author jianhaofly@163.com
      * @time 2023/09/20 10:34
      */
     private function buildBoolQuery(array $conditions) {
@@ -263,6 +274,7 @@ class elasticTools {
                 case 'term':
                 case 'match':
                 case 'match_phrase':
+                case 'match_phrase_prefix':
                 case 'terms':
                 case 'range':
                     foreach ($condition as $field => $value) {
@@ -299,12 +311,15 @@ class elasticTools {
      * Term精确查找
      * @param string $field
      * @param string|int $value
+     * @param int $boost 分值优先级
      * @return $this
-     * @author gengjianhao
+     * @author jianhaofly@163.com
      * @time 2023/09/20 10:01
      */
-    public function where($field, $value) {
+    public function where($field, $value, $boost = 0) {
         $this->conditions['term'][$field] = $value;
+        // 设置优先级分值
+        if ($boost > 0) $this->conditions['term'][$field] = $this->_setBoost($value, $boost);
         return $this;
     }
 
@@ -312,14 +327,17 @@ class elasticTools {
      * Terms WhereIn查询
      * @param string $field
      * @param array $values
+     * @param int $boost 分值优先级
      * @return $this
      * @example
      *  $esTools->whereIn('tags', ['hot', 'top'])
-     * @author gengjianhao
+     * @author jianhaofly@163.com
      * @time 2023/09/20 10:01
      */
-    public function whereIn($field, array $values) {
+    public function whereIn($field, array $values, $boost = 0) {
         $this->conditions['terms'][$field] = $values;
+        // 设置优先级分值
+        if ($boost > 0) $this->conditions['terms'][$field] = $this->_setBoost($values, $boost);
         return $this;
     }
 
@@ -332,7 +350,7 @@ class elasticTools {
      * @return $this
      * @example
      *  $esTools->whereRange('price', '<=>', 10, 50)
-     * @author gengjianhao
+     * @author jianhaofly@163.com
      * @time 2023/09/20 10:01
      */
     public function range($field, $operator, $leftVal, $rightVal = null) {
@@ -365,21 +383,42 @@ class elasticTools {
     }
 
     /**
-     * Match 模糊查找
+     * Match 分词模糊查找
      * @param string $field
      * @param string $value
+     * @param int $boost 分值优先级
      * @return $this
      * @example
      *  $esTools->match('title', '今天 我的') 会调用match（带空格）
      *  $esTools->match('title', '今天我的') 会调用match_phrase
-     * @author gengjianhao
+     * @author jianhaofly@163.com
      * @time 2023/09/20 10:01
      */
-    public function match($field, $value) {
-        $matchParams = $this->_handleMatch($field, $value);
+    public function match($field, $value, $boost = 0) {
+        $matchParams = $this->_handleMatch($field, $value, $boost);
         list($searchType, $searchParam) = array($matchParams['type'], $matchParams['params']);
 
         $this->conditions[$searchType] = $searchParam;
+        return $this;
+    }
+
+    /**
+     * match_phrase_prefix前缀模糊匹配
+     * @param string $field
+     * @param string $value
+     * @param int $boost 分值优先级
+     * @return $this
+     * @author jianhaofly@163.com
+     * @time 2023/10/17 16:31
+     */
+    public function matchPhrasePrefix($field, $value, $boost = 0) {
+        $this->conditions['match_phrase_prefix'][$field] = $value;
+        if ($boost > 0) {
+            $this->conditions['match_phrase_prefix'][$field] = array(
+                "value" => $value,
+                'boots' => $boost
+            );
+        }
         return $this;
     }
 
@@ -389,12 +428,14 @@ class elasticTools {
      * Should Term精确查找
      * @param string $field
      * @param string|int $value
+     * @param int $boost 分值优先级
      * @return $this
-     * @author gengjianhao
+     * @author jianhaofly@163.com
      * @time 2023/09/20 10:01
      */
-    public function orWhere($field, $value) {
+    public function orWhere($field, $value, $boost = 0) {
         $this->conditions['should']['term'][$field] = $value;
+        if ($boost > 0) $this->conditions['should']['term'][$field] = $this->_setBoost($value, $boost);
         return $this;
     }
 
@@ -402,12 +443,14 @@ class elasticTools {
      * Should Wherein查询
      * @param string $field
      * @param array $values
+     * @param int $boost 分值优先级
      * @return $this
-     * @author gengjianhao
+     * @author jianhaofly@163.com
      * @time 2023/09/20 10:01
      */
-    public function orWhereIn($field, array $values) {
+    public function orWhereIn($field, array $values, $boost = 0) {
         $this->conditions['should']['terms'][$field] = $values;
+        if ($boost > 0) $this->conditions['should']['terms'][$field] = $this->_setBoost($values, $boost);
         return $this;
     }
 
@@ -415,15 +458,36 @@ class elasticTools {
      * Should Match匹配查找
      * @param string $field
      * @param string $value
+     * @param int $boost 分值优先级
      * @return $this
-     * @author gengjianhao
+     * @author jianhaofly@163.com
      * @time 2023/09/20 10:01
      */
-    public function orMatch($field, $value) {
-        $matchParams = $this->_handleMatch($field, $value);
+    public function orMatch($field, $value, $boost = 0) {
+        $matchParams = $this->_handleMatch($field, $value, $boost);
         list($searchType, $searchParam) = array($matchParams['type'], $matchParams['params']);
 
         $this->conditions['should'][$searchType] = $searchParam;
+        return $this;
+    }
+
+    /**
+     * Should match_phrase_prefix前缀模糊匹配
+     * @param string $field
+     * @param string $value
+     * @param int $boost 分值优先级
+     * @return $this
+     * @author jianhaofly@163.com
+     * @time 2023/10/17 16:34
+     */
+    public function orMatchPhrasePrefix($field, $value, $boost = 0) {
+        $this->conditions['should']['match_phrase_prefix'][$field] = $value;
+        if ($boost > 0) {
+            $this->conditions['should']['match_phrase_prefix'][$field] = array(
+                "value" => $value,
+                'boots' => $boost
+            );
+        }
         return $this;
     }
 
@@ -434,7 +498,7 @@ class elasticTools {
      * @param string|int $leftVal
      * @param string|int $rightVal
      * @return $this
-     * @author gengjianhao
+     * @author jianhaofly@163.com
      * @time 2023/09/20 10:01
      */
     public function orRange($field, $operator, $leftVal, $rightVal = null) {
@@ -473,7 +537,7 @@ class elasticTools {
      * @param string $field
      * @param string|int $value
      * @return $this
-     * @author gengjianhao
+     * @author jianhaofly@163.com
      * @time 2023/09/20 10:01
      */
     public function notWhere($field, $value) {
@@ -486,7 +550,7 @@ class elasticTools {
      * @param string $field
      * @param string $value
      * @return $this
-     * @author gengjianhao
+     * @author jianhaofly@163.com
      * @time 2023/09/20 10:01
      */
     public function notMatch($field, $value) {
@@ -502,7 +566,7 @@ class elasticTools {
      * @param string $field
      * @param array $values
      * @return $this
-     * @author gengjianhao
+     * @author jianhaofly@163.com
      * @time 2023/09/20 10:01
      */
     public function notWhereIn($field, array $values) {
@@ -517,7 +581,7 @@ class elasticTools {
      * @param string|int $leftVal
      * @param string|int $rightVal
      * @return $this
-     * @author gengjianhao
+     * @author jianhaofly@163.com
      * @time 2023/09/20 10:01
      */
     public function notRange($field, $operator, $leftVal, $rightVal = null) {
@@ -555,14 +619,26 @@ class elasticTools {
      * Filter Term过滤
      * @param string $field
      * @param string|int $value
+     * @param int $boost 分值优先级
      * @return $this
-     * @author gengjianhao
+     * @author jianhaofly@163.com
      * @time 2023/09/21 11:49
      */
-    public function filter($field, $value) {
-        $this->conditions['filter'][] = [
-            'term' => [$field => $value]
-        ];
+    public function filter($field, $value, $boost = 0) {
+        if ($boost > 0) {
+            $this->conditions['filter'][] = [
+                'term' => [
+                    $field => [
+                        "value" => $value,
+                        "boost" => $boost
+                    ]
+                ]
+            ];
+        } else {
+            $this->conditions['filter'][] = [
+                'term' => [$field => $value]
+            ];
+        }
         return $this;
     }
 
@@ -570,16 +646,28 @@ class elasticTools {
      * Filter Terms过滤
      * @param string $field
      * @param array $values
+     * @param int $boost 分值优先级
      * @return $this
      * @example
      *  $esTools->filterTerms('categories', ['electronics', 'computing'])
-     * @author gengjianhao
+     * @author jianhaofly@163.com
      * @time 2023/09/21 15:21
      */
-    public function filterTerms($field, array $values) {
-        $this->conditions['filter'][] = [
-            'terms' => [$field => $values]
-        ];
+    public function filterTerms($field, array $values, $boost = 0) {
+        if ($boost > 0) {
+            $this->conditions['filter'][] = [
+                'terms' => [
+                    $field => [
+                        "value" => $values,
+                        "boost" => $boost
+                    ]
+                ]
+            ];
+        } else {
+            $this->conditions['filter'][] = [
+                'terms' => [$field => $values]
+            ];
+        }
         return $this;
     }
 
@@ -592,7 +680,7 @@ class elasticTools {
      * @return $this
      * @example
      *  $esTools->filterRange('price', '<=>', 55, 120);
-     * @author gengjianhao
+     * @author jianhaofly@163.com
      * @time 2023/09/21 15:25
      */
     public function filterRange($field, $operator, $leftVal, $rightVal = null) {
@@ -633,7 +721,7 @@ class elasticTools {
      * @return $this
      * @example
      *  $esTools->filterGeoDistance('location', 40.730610, -73.935242, '10km')
-     * @author gengjianhao
+     * @author jianhaofly@163.com
      * @time 2023/09/20 15:07
      */
     public function filterGeoDistance($field, $lat, $lon, $distance) {
@@ -665,7 +753,7 @@ class elasticTools {
      *  $esTools->setNestedQuery('goods', 'terms', 'goods.price_id', [1001, 1002]);
      *  $esTools->setNestedQuery('goods', 'range', 'goods.price', ['>=' => 10, '<' => 100]);
      *  $esTools->setNestedQuery('goods', 'match', 'goods.goods_name', '大鱼王 矶钓');
-     * @author gengjianhao
+     * @author jianhaofly@163.com
      * @time 2023/09/22 15:38
      */
     public function setNestedQuery($path, $type, $field, $value, $options = ['type' => 'must']) {
@@ -726,7 +814,7 @@ class elasticTools {
      * @param $field
      * @param $order
      * @return $this
-     * @author gengjianhao
+     * @author jianhaofly@163.com
      * @time 2023/09/21 11:44
      */
     public function orderBy($field, $order = 'asc') {
@@ -744,7 +832,7 @@ class elasticTools {
      * @return $this
      * @example
      *  $esTools->orderByGeoDistance('location', $latitude, $longitude, 'asc')
-     * @author gengjianhao
+     * @author jianhaofly@163.com
      * @time 2023/09/20 14:56
      */
     public function orderByGeoDistance($field, $latitude, $longitude, $order = 'asc', $unit = 'm') {
@@ -773,7 +861,7 @@ class elasticTools {
      * 展示数量
      * @param int $size
      * @return $this
-     * @author gengjianhao
+     * @author jianhaofly@163.com
      * @time 2023/09/23 16:57
      */
     public function limit($size) {
@@ -785,7 +873,7 @@ class elasticTools {
      * 偏移量
      * @param int $from
      * @return $this
-     * @author gengjianhao
+     * @author jianhaofly@163.com
      * @time 2023/09/23 16:57
      */
     public function offset($from) {
@@ -794,22 +882,47 @@ class elasticTools {
     }
 
     /**
+     * 设置suggest搜索语句
+     * @param string $field
+     * @param string $suggestField
+     * @param string $keyword
+     * @param int $size
+     * @return $this
+     * @author jianhaofly@163.com
+     * @time 2023/10/17 10:26
+     */
+    public function setSuggestSearch($field, $suggestField, $keyword, $size = 5) {
+        $this->suggest = array(
+            $field => array(
+                "prefix" => $keyword,
+                "completion" => array(
+                    "field" => $suggestField,
+                    "size" => $size
+                )
+            )
+        );
+        return $this;
+    }
+
+    /**
      * 根据输入的查询字符串，获取相关文档
      *
-     * @param string $input 输入的查询字符串
+     * @param string $keyword 输入的查询字符串
      * @param string $suggestField 使用completion suggester的字段
      * @param int $from 从第几条数据开始
      * @param int $size 返回多少条文档
      * @param array $sort 排序规则
      * @return array 返回的文档结果
+     * @author jianhaofly@163.com
+     * @time 2023/09/23 16:57
      */
-    public function getSuggestions($input, $suggestField, $from = 0, $size = 10, $sort = ['create_time' => ['order' => 'desc']]) {
-        // 第一步: 使用completion suggester获取建议词条
+    public function getSuggestions($keyword, $suggestField, $from = 0, $size = 10, $sort = 'create_time desc') {
+        // 第一步: 使用completion suggester自动补全获取建议词条
         $suggestParams = [
             'index' => $this->index,
             'body' => [
                 'suggest' => [
-                    'text' => $input,
+                    'text' => $keyword,
                     'completion' => [
                         'field' => $suggestField,
                         'size' => $size
@@ -832,6 +945,7 @@ class elasticTools {
         }
 
         // 第二步: 使用得到的词条进行普通搜索
+        list($sortField, $sortType) = explode(" ", $sort);
         $searchParams = [
             'index' => $this->index,
             'body' => [
@@ -842,7 +956,9 @@ class elasticTools {
                         $suggestField => $suggestedTerms
                     ]
                 ],
-                'sort' => $sort
+                'sort' => [
+                    $sortField => $sortType
+                ]
             ]
         ];
 
@@ -856,7 +972,7 @@ class elasticTools {
      * @param string $sumField 要求和的字段
      * @param array $query
      * @return float
-     * @author gengjianhao
+     * @author jianhaofly@163.com
      * @time 2023/09/23 17:19
      */
     public function aggregateBySum($sumField, $query = []) {
@@ -883,7 +999,7 @@ class elasticTools {
      * @param string $field 要进行分析的字段
      * @param array $query
      * @return array
-     * @author gengjianhao
+     * @author jianhaofly@163.com
      * @time 2023/09/23 17:21
      */
     public function aggregateByTerms($field, $query = []) {
@@ -992,13 +1108,14 @@ class elasticTools {
     /*************************************** 公共处理方法 **************************************/
     /**
      * 处理match语句
-     * @params string $field
-     * @params string $value
+     * @param string $field
+     * @param string $value
+     * @param int $boost
      * @return array
-     * @author gengjianhao
+     * @author jianhaofly@163.com
      * @time 2023/09/22 15:42
      */
-    private function _handleMatch($field, $value) {
+    private function _handleMatch($field, $value, $boost = 0) {
         $type = 'match';
         $queryParams = array();
 
@@ -1008,16 +1125,37 @@ class elasticTools {
                 'query' => $value,
                 'operator' => 'and'
             );
+            if ($boost > 0) $queryParams[$field]['boost'] = $boost;
         } else {
             $type = 'match_phrase';
             $queryParams[$field] = $value;
+            if ($boost > 0) {
+                $queryParams[$field] = array(
+                    "value" => $value,
+                    'boots' => $boost
+                );
+            }
         }
 
         return array('type' => $type, 'params' => $queryParams);
     }
 
+    /**
+     * 设置优先级分值
+     * @params int|string|array $conditions
+     * @params int $boost
+     * @return array
+     * @author jianhaofly@163.com
+     * @time 2023/10/17 09:41
+     */
+    private function _setBoost($value, $boost) {
+        $conditions = array(
+            "value" => $value,
+            "boost" => $boost
+        );
+        return $conditions;
+    }
 }
-
     // 基础调用Demo
     // $esTools = elasticTools::getInstance();
     // $size = 20;
