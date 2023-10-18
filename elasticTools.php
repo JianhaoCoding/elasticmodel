@@ -484,8 +484,8 @@ class SearchModel extends Model {
         $this->conditions['should']['match_phrase_prefix'][$field] = $value;
         if ($boost > 0) {
             $this->conditions['should']['match_phrase_prefix'][$field] = array(
-                "value" => $value,
-                'boots' => $boost
+                "query" => $value,
+                'boost' => $boost
             );
         }
         return $this;
