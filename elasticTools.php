@@ -921,27 +921,32 @@ class SearchModel extends Model {
         $suggestParams = [
             'index' => $this->index,
             'body' => [
+                '_source' => false,
                 'suggest' => [
-                    'text' => $keyword,
-                    'completion' => [
-                        'field' => $suggestField,
-                        'size' => $size
+                    'keywords' => [
+                        "prefix" => $keyword,
+                        "completion" => [
+                            'field' => $suggestField,
+                            'size'  => $size
+                        ]
                     ]
                 ]
             ]
         ];
-
         $suggestions = $this->client->search($suggestParams);
 
-        $suggestedTerms = [];
-        foreach ($suggestions['suggest'] as $suggestResult) {
-            foreach ($suggestResult['options'] as $option) {
-                $suggestedTerms[] = $option['text'];
+        $keywords = [];
+        $suggestKeywords  = isset($suggestions['suggest']['keywords']) ? $suggestions['suggest']['keywords'] : array();
+        if (!empty($suggestKeywords)) {
+            foreach ($suggestKeywords as $suggestKeyword) {
+                foreach ($suggestKeyword['options'] as $option) {
+                    $keywords[] = $option['text'];
+                }
             }
         }
 
-        if (empty($suggestedTerms)) {
-            return [];
+        if (empty($keywords)) {
+            return array('data' => array(), 'total' => 0);
         }
 
         // 第二步: 使用得到的词条进行普通搜索
@@ -962,9 +967,17 @@ class SearchModel extends Model {
             ]
         ];
 
-        $docResults = $this->client->search($searchParams);
+        $response = $this->client->search($searchParams);
+        //处理结果集
+        $hitsRes = $res = array();
+        $data = array('data' => array(), 'total' => 0);
+        if (!empty($response['hits'])) $hitsRes = $response['hits'];
+        if (empty($hitsRes) || $hitsRes['total']['value'] < 1) return $data;
+        foreach ($hitsRes['hits'] as $key => $val) {
+            $res[$key] = $val['_source'];
+        }
 
-        return isset($docResults['hits']['hits']) ? $docResults['hits']['hits'] : [];
+        return array('data' => $res, 'total' => $hitsRes['total']['value']);
     }
 
     /**
